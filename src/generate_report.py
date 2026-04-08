@@ -36,6 +36,7 @@ import glob
 import csv
 import json
 import re
+import tomllib
 from typing import Dict
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,77 @@ from reportlab.platypus import (
 )
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+# Fallback versions used when pixi.toml cannot be found or parsed.
+_FALLBACK_VERSIONS: Dict[str, str] = {
+    'python':       '3.12',
+    'scanpy':       '1.11.5',
+    'anndata':      '0.12.6',
+    'scvi_tools':   '1.4.2',
+    'harmonypy':    '0.2.0',
+    'leidenalg':    '0.11.0',
+    'grthub_tools': '0.1.0',
+}
+
+# pixi.toml package name → SOFTWARE_VERSIONS key
+_PIXI_PKG_MAP: Dict[str, str] = {
+    'python':       'python',
+    'scanpy':       'scanpy',
+    'anndata':      'anndata',
+    'harmonypy':    'harmonypy',
+    'leidenalg':    'leidenalg',
+    'scvi-tools':   'scvi_tools',
+    'grthub-tools': 'grthub_tools',
+}
+
+_VERSION_RE = re.compile(r'(\d+\.\d+(?:\.\d+)?)')
+
+
+def _load_pixi_versions(pixi_path: str) -> Dict[str, str]:
+    """
+    Parse pixi.toml and return a SOFTWARE_VERSIONS-style dict.
+
+    Searches all ``dependencies`` and ``pypi-dependencies`` sections
+    (root and every feature).  Feature-level pins take precedence over
+    root-level ranges because features are processed last.
+    Falls back to _FALLBACK_VERSIONS for any package not found or whose
+    specifier is a bare wildcard (``*``).
+    """
+    result = dict(_FALLBACK_VERSIONS)
+    try:
+        with open(pixi_path, 'rb') as fh:
+            data = tomllib.load(fh)
+    except Exception as e:
+        print(f"Warning: could not read pixi.toml at {pixi_path}: {e}")
+        return result
+
+    # Collect dep dicts in order: root first, then each feature (so exact
+    # feature pins overwrite root ranges for the same package).
+    dep_sections = []
+    for key in ('dependencies', 'pypi-dependencies'):
+        if key in data:
+            dep_sections.append(data[key])
+    for feature_data in data.get('feature', {}).values():
+        for key in ('dependencies', 'pypi-dependencies'):
+            if key in feature_data:
+                dep_sections.append(feature_data[key])
+
+    for deps in dep_sections:
+        for pkg, spec in deps.items():
+            our_key = _PIXI_PKG_MAP.get(pkg)
+            if our_key is None:
+                continue
+            ver_str = spec if isinstance(spec, str) else spec.get('version', '')
+            m = _VERSION_RE.search(ver_str)
+            if m:
+                result[our_key] = m.group(1)
+
+    return result
+
+
+# Resolve versions at import time from pixi.toml next to this package.
+_PIXI_TOML = Path(__file__).parent.parent / 'pixi.toml'
+SOFTWARE_VERSIONS = _load_pixi_versions(str(_PIXI_TOML))
 
 
 class ParseSublibraryExtractor:
@@ -261,6 +333,10 @@ class ParseMetadata:
         n_top_genes = processing_params.get('n_top_genes', '2000')
         cluster_resolution = processing_params.get('cluster_resolution', '0.5')
 
+        sc_ver    = SOFTWARE_VERSIONS['scanpy']
+        hpy_ver   = SOFTWARE_VERSIONS['harmonypy']
+        lei_ver   = SOFTWARE_VERSIONS['leidenalg']
+        scvi_ver  = SOFTWARE_VERSIONS['scvi_tools']
         blurbs = {}
         groups = self.get_experiment_groups()
         for exp_id, rows in groups.items():
@@ -268,33 +344,48 @@ class ParseMetadata:
             treatments = sorted({r.get('treatment', '').strip() for r in rows if r.get('treatment')})
             treatment_text = self._join_limited(treatments, limit=3) if treatments else 'multiple treatment conditions'
 
+            _shared_de = (
+                f" Cluster-defining marker genes were identified by Wilcoxon rank-sum test comparing each "
+                f"Leiden cluster against all remaining cells (sc.tl.rank_genes_groups; Scanpy v{sc_ver}), "
+                f"with the top 5 markers per cluster visualized as a dot plot. "
+                f"Within-cluster differential expression between conditions was then performed for each "
+                f"Leiden cluster separately: cells from the treatment group were compared against controls "
+                f"with a Wilcoxon test, and results (scores, log-fold changes, adjusted p-values) were "
+                f"exported as an Excel workbook with one sheet per cluster."
+            )
+
             if exp_id == '1':
                 blurbs[exp_id] = (
-                    f"Experiment 1 ({n_samples} samples; {treatment_text}) used the Parse Biosciences analysis "
-                    "pipeline for FASTQ demultiplexing, barcode correction, alignment to hg38, and transcript counting "
-                    "to generate filtered expression matrices. Quality control retained cells with at least "
-                    f"{min_genes} detected genes and genes detected in at least {min_cells} cells. Data were "
-                    "normalized to 10,000 counts per cell and log-transformed, then highly variable genes "
-                    f"({n_top_genes}) were selected for PCA and Harmony batch correction (batch key: batch). "
-                    f"Harmony-corrected embeddings were used for neighbor graph construction, UMAP visualization, "
-                    f"Leiden clustering (resolution {cluster_resolution}), and Wilcoxon marker ranking."
+                    f"Experiment 1 ({n_samples} samples; {treatment_text}) was processed with Parse split-pipe for "
+                    "read processing, alignment to hg38, and filtered matrix generation. Cells and genes were filtered "
+                    f"using thresholds of >= {min_genes} genes per cell and >= {min_cells} cells per gene "
+                    f"(Scanpy v{sc_ver}), followed "
+                    "by total-count normalization and log1p transformation. Highly variable genes "
+                    f"({n_top_genes}) were used for PCA, Harmony integration across batches "
+                    f"(harmonypy v{hpy_ver}), and graph-based "
+                    f"analysis including UMAP and Leiden clustering (leidenalg v{lei_ver}; resolution {cluster_resolution})."
+                    + _shared_de
                 )
             elif exp_id == '2':
                 blurbs[exp_id] = (
                     f"Experiment 2 ({n_samples} samples; {treatment_text}) was processed with Parse split-pipe for "
                     "read processing, alignment to hg38, and filtered matrix generation. Cells and genes were filtered "
-                    f"using thresholds of >= {min_genes} genes per cell and >= {min_cells} cells per gene, followed "
+                    f"using thresholds of >= {min_genes} genes per cell and >= {min_cells} cells per gene "
+                    f"(Scanpy v{sc_ver}), followed "
                     "by total-count normalization and log1p transformation. Highly variable genes "
-                    f"({n_top_genes}) were used for PCA, Harmony integration across batches, and graph-based "
-                    f"analysis including UMAP and Leiden clustering (resolution {cluster_resolution}), with "
-                    "Wilcoxon-based marker discovery across recovered clusters."
+                    f"({n_top_genes}) were used for PCA, Harmony integration across batches "
+                    f"(harmonypy v{hpy_ver}), and graph-based "
+                    f"analysis including UMAP and Leiden clustering (leidenalg v{lei_ver}; resolution {cluster_resolution})."
+                    + _shared_de
                 )
             else:
                 blurbs[exp_id] = (
                     f"Experiment {exp_id} ({n_samples} samples; {treatment_text}) followed the same processing "
-                    "framework: Parse matrix generation, QC filtering, normalization/log transformation, "
-                    "HVG-based PCA and Harmony integration, then UMAP, Leiden clustering, and Wilcoxon marker "
-                    "analysis."
+                    f"framework: Parse matrix generation, QC filtering (Scanpy v{sc_ver}), "
+                    "normalization/log transformation, "
+                    f"HVG-based PCA and Harmony integration (harmonypy v{hpy_ver}), UMAP, "
+                    f"Leiden clustering (leidenalg v{lei_ver})."
+                    + _shared_de
                 )
         return blurbs
 
@@ -546,11 +637,14 @@ class ReportGenerator:
 
         elements.append(Paragraph("<b>Downstream Analysis</b>", styles['Heading3']))
         elements.append(Paragraph(
-            "Filtered DGE matrices were analyzed with Scanpy and project helper modules. "
-            "The project-specific integration script combines all Parse samples, preprocesses with "
+            f"Filtered DGE matrices were analyzed with Scanpy v{SOFTWARE_VERSIONS['scanpy']} "
+            f"(AnnData v{SOFTWARE_VERSIONS['anndata']}; Python v{SOFTWARE_VERSIONS['python']}). "
+            "The integration script combines all Parse samples, preprocesses with "
             "library-size normalization and log1p transform, performs batch-aware HVG selection, "
-            "integrates with Harmony on PCA space, computes UMAP/neighbors, and clusters cells with "
-            "Leiden on Harmony embeddings.",
+            f"integrates with Harmony (harmonypy v{SOFTWARE_VERSIONS['harmonypy']}) on PCA space, "
+            "computes UMAP/neighbors, and clusters cells with "
+            f"Leiden (leidenalg v{SOFTWARE_VERSIONS['leidenalg']}) on Harmony embeddings. "
+            f"Optional scVI integration is also supported (scvi-tools v{SOFTWARE_VERSIONS['scvi_tools']}).",
             body_style
         ))
 
@@ -682,14 +776,62 @@ class ReportGenerator:
         elements.append(param_table)
         elements.append(Spacer(1, 0.15 * inch))
 
+        elements.append(Paragraph("<b>Software Versions</b>", styles['Heading3']))
+        sw_table_data = [
+            ['Package', 'Version'],
+            ['Python',         SOFTWARE_VERSIONS['python']],
+            ['Scanpy',         SOFTWARE_VERSIONS['scanpy']],
+            ['AnnData',        SOFTWARE_VERSIONS['anndata']],
+            ['harmonypy',      SOFTWARE_VERSIONS['harmonypy']],
+            ['leidenalg',      SOFTWARE_VERSIONS['leidenalg']],
+            ['scvi-tools',     SOFTWARE_VERSIONS['scvi_tools']],
+        ]
+        sw_table = Table(sw_table_data, colWidths=[2.8 * inch, 2.7 * inch])
+        sw_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f4788')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+        ]))
+        elements.append(sw_table)
+        elements.append(Spacer(1, 0.15 * inch))
+
         elements.append(Paragraph("<b>Integration Workflow</b>", styles['Heading3']))
         elements.append(Paragraph(
-            "The integration workflow scans all sample directories under parse_comb for DGE_filtered/count_matrix.mtx, "
-            "loads each sample with the project Parse-reader helper function, tags each cell with its sample batch, "
+            "The integration workflow scans all sample directories under parse_comb for "
+            "DGE_filtered/count_matrix.mtx, loads each sample, tags each cell with its sample batch, "
             "concatenates all samples into a combined AnnData object, and saves combined.h5ad. "
-            "It then runs preprocessing followed by Harmony integration helper routines, "
-            "which builds PCA, Harmony embeddings, UMAP coordinates, neighbor graphs, "
-            "Leiden clusters, and marker ranking using Wilcoxon tests.",
+            "It then runs preprocessing followed by Harmony integration, "
+            "building PCA, Harmony-corrected embeddings (X_pca_harmony), neighbor graphs, "
+            "UMAP coordinates, and Leiden clusters.",
+            body_style,
+        ))
+
+        elements.append(Paragraph("<b>Marker Gene Identification</b>", styles['Heading3']))
+        elements.append(Paragraph(
+            "Cluster-defining marker genes were identified with sc.tl.rank_genes_groups "
+            "(Wilcoxon rank-sum test, each Leiden cluster vs. all others). "
+            "The top 5 markers per cluster are visualized as a dot plot "
+            "(sc.pl.rank_genes_groups_dotplot, scaled per gene). "
+            "Full results are exported to a CSV file (marker_genes_per_cluster.csv).",
+            body_style,
+        ))
+
+        elements.append(Paragraph("<b>Within-Cluster Differential Expression</b>", styles['Heading3']))
+        elements.append(Paragraph(
+            "Condition-vs-control differential expression was performed independently within "
+            "each Leiden cluster. For every cluster, cells from the treatment group are compared "
+            "against controls with a Wilcoxon rank-sum test. "
+            "Results (gene scores, log-fold changes, adjusted p-values) are collected across "
+            "all clusters and exported as an Excel workbook "
+            "(ranked_genes_per_cluster.xlsx) with one sheet per cluster, "
+            "enabling cluster-specific identification of treatment-responsive genes.",
             body_style,
         ))
 
