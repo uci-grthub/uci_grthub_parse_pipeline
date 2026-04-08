@@ -1,7 +1,7 @@
 [workspace]
 authors = ["Kevin Stachelek <kstachel@uci.edu>"]
 channels = ["conda-forge"]
-name = "scvi-tools"
+name = "uci_grthub_parse_pipeline"
 platforms = ["linux-64"]
 version = "0.1.0"
 conda-pypi-map = { "conda-forge" = "file:///dfs9/ucightf-lab/kstachel/pixi_cache/conda-pypi-mapping-local/compressed_mapping.json", "bioconda" = "file:///dfs9/ucightf-lab/kstachel/pixi_cache/conda-pypi-mapping-local/compressed_mapping.json" }
@@ -11,13 +11,13 @@ conda-pypi-map = { "conda-forge" = "file:///dfs9/ucightf-lab/kstachel/pixi_cache
 [dependencies]
 python = ">=3.14.3,<3.15"
 
-[feature.scvi-tools]
+[feature.uci_grthub_parse_pipeline]
 channels = ["conda-forge", "bioconda", "https://conda.anaconda.org/conda-forge", "https://conda.anaconda.org/conda-forge"]
 
-[feature.scvi-tools.activation]
+[feature.uci_grthub_parse_pipeline.activation]
 env = { PYTHONNOUSERSITE = "1" }
 
-[feature.scvi-tools.dependencies]
+[feature.uci_grthub_parse_pipeline.dependencies]
 python = "~=3.12.0"
 scanpy = "==1.11.5"
 python-igraph = "*"
@@ -33,7 +33,7 @@ jupyter = "*"
 scvi-tools = "*"
 rpy2 = "*"
 
-[feature.scvi-tools.pypi-dependencies]
+[feature.uci_grthub_parse_pipeline.pypi-dependencies]
 aiofiles = "==24.1.0"
 aiohappyeyeballs = "==2.6.1"
 aiohttp = "==3.12.15"
@@ -148,7 +148,7 @@ xarray-spatial = "==0.4.0"
 yarl = "==1.20.1"
 
 [environments]
-scvi-tools = { features = ["scvi-tools"], no-default-feature = true }
+uci_grthub_parse_pipeline = { features = ["uci_grthub_parse_pipeline"], no-default-feature = true }
 
 [pypi-dependencies]
 cellsweep = ">=0.1.2, <0.2"
