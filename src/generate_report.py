@@ -36,6 +36,7 @@ import glob
 import csv
 import json
 import re
+from typing import Dict
 from datetime import datetime
 from pathlib import Path
 from reportlab.lib.pagesizes import letter, landscape
@@ -245,6 +246,97 @@ class ParseMetadata:
             groups.setdefault(exp, []).append(row)
         return groups
 
+    @staticmethod
+    def _join_limited(values, limit=4):
+        vals = [v for v in values if v]
+        if len(vals) <= limit:
+            return ", ".join(vals)
+        return ", ".join(vals[:limit]) + ", and others"
+
+    def get_methods_blurbs(self, processing_params=None):
+        """Return concise, pipeline-structured methods blurbs keyed by experiment ID."""
+        processing_params = processing_params or {}
+        min_genes = processing_params.get('min_genes', '200')
+        min_cells = processing_params.get('min_cells', '5')
+        n_top_genes = processing_params.get('n_top_genes', '2000')
+        cluster_resolution = processing_params.get('cluster_resolution', '0.5')
+
+        blurbs = {}
+        groups = self.get_experiment_groups()
+        for exp_id, rows in groups.items():
+            n_samples = len(rows)
+            treatments = sorted({r.get('treatment', '').strip() for r in rows if r.get('treatment')})
+            treatment_text = self._join_limited(treatments, limit=3) if treatments else 'multiple treatment conditions'
+
+            if exp_id == '1':
+                blurbs[exp_id] = (
+                    f"Experiment 1 ({n_samples} samples; {treatment_text}) used the Parse Biosciences analysis "
+                    "pipeline for FASTQ demultiplexing, barcode correction, alignment to hg38, and transcript counting "
+                    "to generate filtered expression matrices. Quality control retained cells with at least "
+                    f"{min_genes} detected genes and genes detected in at least {min_cells} cells. Data were "
+                    "normalized to 10,000 counts per cell and log-transformed, then highly variable genes "
+                    f"({n_top_genes}) were selected for PCA and Harmony batch correction (batch key: batch). "
+                    f"Harmony-corrected embeddings were used for neighbor graph construction, UMAP visualization, "
+                    f"Leiden clustering (resolution {cluster_resolution}), and Wilcoxon marker ranking."
+                )
+            elif exp_id == '2':
+                blurbs[exp_id] = (
+                    f"Experiment 2 ({n_samples} samples; {treatment_text}) was processed with Parse split-pipe for "
+                    "read processing, alignment to hg38, and filtered matrix generation. Cells and genes were filtered "
+                    f"using thresholds of >= {min_genes} genes per cell and >= {min_cells} cells per gene, followed "
+                    "by total-count normalization and log1p transformation. Highly variable genes "
+                    f"({n_top_genes}) were used for PCA, Harmony integration across batches, and graph-based "
+                    f"analysis including UMAP and Leiden clustering (resolution {cluster_resolution}), with "
+                    "Wilcoxon-based marker discovery across recovered clusters."
+                )
+            else:
+                blurbs[exp_id] = (
+                    f"Experiment {exp_id} ({n_samples} samples; {treatment_text}) followed the same processing "
+                    "framework: Parse matrix generation, QC filtering, normalization/log transformation, "
+                    "HVG-based PCA and Harmony integration, then UMAP, Leiden clustering, and Wilcoxon marker "
+                    "analysis."
+                )
+        return blurbs
+
+
+class ProjectConfigSummary:
+    """Read a small set of top-level config values from config.yaml."""
+
+    KEYS = [
+        'min_genes',
+        'min_cells',
+        'n_top_genes',
+        'batch_key',
+        'harmony_theta',
+        'harmony_dims',
+        'cluster_resolution',
+    ]
+
+    def __init__(self, path: str):
+        self.path = path
+        self.values: Dict[str, str] = {}
+        self._load()
+
+    def _load(self):
+        if not self.path or not os.path.isfile(self.path):
+            return
+        try:
+            with open(self.path) as fh:
+                for line in fh:
+                    s = line.strip()
+                    if not s or s.startswith('#') or ':' not in s:
+                        continue
+                    if line.startswith(' ') or line.startswith('\t'):
+                        continue
+                    key, val = s.split(':', 1)
+                    key = key.strip()
+                    if key not in self.KEYS:
+                        continue
+                    val = val.split('#', 1)[0].strip().strip('"').strip("'")
+                    self.values[key] = val
+        except Exception as e:
+            print(f"Warning: could not read config {self.path}: {e}")
+
 
 class ReportGenerator:
     """Generate PDF report summarizing Parse scRNA-seq pipeline inputs and outputs."""
@@ -259,6 +351,7 @@ class ReportGenerator:
         self.summary = self.sublibs.get_summary()
         self.parse_summary = ParseSampleSummary(parse_dir)
         self.metadata = ParseMetadata(metadata_path)
+        self.config = ProjectConfigSummary(os.path.join(workdir, 'config.yaml'))
 
     def generate(self):
         left_margin = 0.75 * inch
@@ -340,11 +433,27 @@ class ReportGenerator:
 
         # ── Title ───────────────────────────────────────────────────────────
         elements.append(Paragraph("Parse Biosciences scRNA-seq Project Report", title_style))
-        elements.append(Paragraph("SparN Toxicant Exposure Study", ParagraphStyle(
-            'Subtitle', parent=styles['BodyText'], fontSize=14,
-            alignment=TA_CENTER, textColor=colors.HexColor('#555555'), spaceAfter=16
-        )))
         elements.append(Spacer(1, 0.2 * inch))
+
+        # ── Methods Summary by Experiment ──────────────────────────────────
+        elements.append(Paragraph("Methods Summary by Experiment", heading_style))
+        if self.metadata.rows:
+            blurbs = self.metadata.get_methods_blurbs(self.config.values)
+            if '1' in blurbs:
+                elements.append(Paragraph("<b>Experiment 1</b>", styles['Heading3']))
+                elements.append(Paragraph(blurbs['1'], body_style))
+            if '2' in blurbs:
+                elements.append(Paragraph("<b>Experiment 2</b>", styles['Heading3']))
+                elements.append(Paragraph(blurbs['2'], body_style))
+
+            for exp_id in sorted(k for k in blurbs.keys() if k not in {'1', '2'}):
+                elements.append(Paragraph(f"<b>Experiment {exp_id}</b>", styles['Heading3']))
+                elements.append(Paragraph(blurbs[exp_id], body_style))
+        else:
+            elements.append(Paragraph(
+                "Experiment-specific methods summary was not generated because metadata was unavailable.",
+                body_style,
+            ))
 
         # ── Project Information ──────────────────────────────────────────────
         elements.append(Paragraph("Project Information", heading_style))
@@ -437,9 +546,11 @@ class ReportGenerator:
 
         elements.append(Paragraph("<b>Downstream Analysis</b>", styles['Heading3']))
         elements.append(Paragraph(
-            "Filtered DGE matrices were analyzed with Scanpy and scVI-tools. Integration across "
-            "sublibraries and samples was performed with scVI/scANVI. Clustering used the Leiden "
-            "algorithm. Additional integration was performed with Harmony for comparison.",
+            "Filtered DGE matrices were analyzed with Scanpy and project helper modules. "
+            "The project-specific integration script combines all Parse samples, preprocesses with "
+            "library-size normalization and log1p transform, performs batch-aware HVG selection, "
+            "integrates with Harmony on PCA space, computes UMAP/neighbors, and clusters cells with "
+            "Leiden on Harmony embeddings.",
             body_style
         ))
 
@@ -538,6 +649,49 @@ class ReportGenerator:
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
             ]))
             elements.append(meta_table)
+
+        # ── Implementation Details (portrait) ───────────────────────────────
+        elements.append(NextPageTemplate('Portrait'))
+        elements.append(PageBreak())
+        elements.append(Paragraph("Integration Implementation Details", heading_style))
+
+        cfg = self.config.values
+        param_table_data = [
+            ['Parameter', 'Configured Value'],
+            ['min_genes (cell filter)', cfg.get('min_genes', 'N/A')],
+            ['min_cells (gene filter)', cfg.get('min_cells', 'N/A')],
+            ['n_top_genes (HVG selection)', cfg.get('n_top_genes', 'N/A')],
+            ['batch_key', cfg.get('batch_key', 'N/A')],
+            ['harmony_theta', cfg.get('harmony_theta', 'N/A')],
+            ['harmony_dims', cfg.get('harmony_dims', 'N/A')],
+            ['cluster_resolution (Leiden)', cfg.get('cluster_resolution', '0.5 (script default)')],
+        ]
+        param_table = Table(param_table_data, colWidths=[2.8 * inch, 2.7 * inch])
+        param_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f4788')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+        ]))
+        elements.append(param_table)
+        elements.append(Spacer(1, 0.15 * inch))
+
+        elements.append(Paragraph("<b>Integration Workflow</b>", styles['Heading3']))
+        elements.append(Paragraph(
+            "The integration workflow scans all sample directories under parse_comb for DGE_filtered/count_matrix.mtx, "
+            "loads each sample with the project Parse-reader helper function, tags each cell with its sample batch, "
+            "concatenates all samples into a combined AnnData object, and saves combined.h5ad. "
+            "It then runs preprocessing followed by Harmony integration helper routines, "
+            "which builds PCA, Harmony embeddings, UMAP coordinates, neighbor graphs, "
+            "Leiden clusters, and marker ranking using Wilcoxon tests.",
+            body_style,
+        ))
 
         # ── References (portrait) ────────────────────────────────────────────
         elements.append(NextPageTemplate('Portrait'))
