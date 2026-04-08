@@ -28,3 +28,4 @@ config.local.yaml
 src/inspect_integrated_anndata_bp.ipynb
 src/inspect_integrated_anndata_nonbp.ipynb
 nneamaka_code.R
+*.pdf

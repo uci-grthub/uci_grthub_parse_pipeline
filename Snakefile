@@ -30,6 +30,7 @@ TRANSCRIPTOME = config["references"]["transcriptome"]
 OUTPUT_DIR = config["paths"]["output"]
 # Optional project directory name used when building the Seurat5Shiny bundle
 PROJECT_DIR_NAME = config.get("project_dir_name", "parse_comb")
+REPORT = f"{OUTPUT_DIR}/{PROJECT_DIR_NAME}_report.pdf"
 
 def create_sample_list_from_excel(excel_path, output_path):
     """
@@ -234,6 +235,7 @@ rule all:
         f"{OUTPUT_DIR}/scanpy/combined.h5ad",
         f"{OUTPUT_DIR}/scanpy/inspect_integrated_anndata_combined.ipynb",
         f"{OUTPUT_DIR}/Seurat5Shiny/{PROJECT_DIR_NAME}",
+        REPORT,
         *_bp_nonbp_outputs
 
 # Helper function to get FASTQ files for a sample
@@ -764,6 +766,34 @@ rule scrublet:
         """
         mkdir -p {OUTPUT_DIR}/scrublet
         python {params.script} --input {input.matrix} --output {output.doublets}
+        """
+
+rule generate_report:
+    input:
+        parse_comb = f"{OUTPUT_DIR}/parse_comb/all_summaries.zip",
+        notebook = f"{OUTPUT_DIR}/scanpy/inspect_integrated_anndata_combined.ipynb",
+        metadata = "metadata/metadata.csv",
+        script = "src/generate_report.py"
+    output:
+        report = REPORT
+    conda: "scvi-tools"
+    params:
+        parse_dir = f"{OUTPUT_DIR}/parse_comb",
+        fastq_dir = FASTQ_DIR
+    threads: 1
+    resources:
+        mem_mb = 4000,
+        cpus = 1,
+        partition = "standard",
+        account = "sbsandme_lab"
+    shell:
+        """
+        pip install --quiet reportlab 2>/dev/null || true
+        python {input.script} \
+            --fastq-dir {params.fastq_dir} \
+            --parse-dir {params.parse_dir} \
+            --metadata {input.metadata} \
+            --output {output.report}
         """
 
 if os.path.exists(_bp_nonbp_smk):
