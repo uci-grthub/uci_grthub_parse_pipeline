@@ -29,3 +29,8 @@ src/inspect_integrated_anndata_bp.ipynb
 src/inspect_integrated_anndata_nonbp.ipynb
 nneamaka_code.R
 *.pdf
+src/parse-upload-1.2.1.sh
+src/parse-upload-1.2.1.py
+resume_params.txt
+part_etags.txt
+*.log

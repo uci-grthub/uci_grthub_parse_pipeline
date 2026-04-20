@@ -24,6 +24,7 @@ params:
   localcores: 8
   localmem: 128  # GB
   kit: "WT_mega"
+  chemistry: "v3"
 
 ## Scenic
 TFs: "/dfs9/ucightf-lab/kstachel/kstachel_references/scenic/hs_hgnc_curated_tfs.txt"

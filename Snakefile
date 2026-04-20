@@ -307,7 +307,8 @@ rule parse_all:
         localmem = config["params"]["localmem"],
         parse_container = config["parse_container"],
         parse_transcriptome = config["parse_transcriptome"],
-        kit = config["params"].get("kit", "WT_mega")
+        kit = config["params"].get("kit", "WT_mega"),
+        chemistry = config["params"].get("chemistry", "v3")
     threads: 8
     resources:
         mem_mb = 48000,  # 48GB in MB
@@ -321,7 +322,7 @@ rule parse_all:
         split-pipe \
         --mode all \
         --kit {params.kit} \
-        --chemistry v3 \
+        --chemistry {params.chemistry} \
         --genome_dir {params.parse_transcriptome} \
         --fq1 {input.r1} \
         --fq2 {input.r2} \
@@ -344,7 +345,8 @@ rule parse_comb:
         localcores = config["params"]["localcores"],
         localmem = config["params"]["localmem"],
         parse_transcriptome = config["parse_transcriptome"],
-        kit = config["params"].get("kit", "WT_mega")
+        kit = config["params"].get("kit", "WT_mega"),
+        chemistry = config["params"].get("chemistry", "v3")
     threads: 8
     resources:
         mem_mb = 131072,  # 128GB in MB
@@ -358,7 +360,7 @@ rule parse_comb:
         split-pipe \
         --mode comb \
         --kit {params.kit} \
-        --chemistry v3 \
+        --chemistry {params.chemistry} \
         --genome_dir {params.parse_transcriptome} \
         --output_dir {output.output_dir} \
         --sublibraries {input.sublibraries} \
