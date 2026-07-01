@@ -36,3 +36,5 @@ part_etags.txt
 *.log
 .codetree/
 tmp/
+src/luisa_code.R
+src/luisa_annotation.R

@@ -10,7 +10,6 @@ onerror:
    shell("mail -s 'ERROR' {EMAIL} < {log}")
 
 from datetime import datetime
-import loompy
 import os
 import glob
 import re
@@ -236,7 +235,7 @@ rule all:
         f"{OUTPUT_DIR}/scanpy/inspect_integrated_anndata_combined.ipynb",
         f"{OUTPUT_DIR}/Seurat5Shiny/{PROJECT_DIR_NAME}",
         REPORT,
-        *_bp_nonbp_outputs
+        # *_bp_nonbp_outputs
 
 # Helper function to get FASTQ files for a sample
 def get_fastq_files(wildcards, read):
@@ -629,20 +628,6 @@ rule multi_sample_summary:
                 f.write(f"  - Web summary: {OUTPUT_DIR}/cellranger/{sample}/outs/web_summary.html\n")
                 f.write(f"  - Filtered matrix: {OUTPUT_DIR}/cellranger/{sample}/outs/filtered_feature_bc_matrix.h5\n")
                 f.write(f"  - BAM file: {OUTPUT_DIR}/cellranger/{sample}/outs/possorted_genome_bam.bam\n\n")
-
-# Rule: loompy
-rule loompy:
-    input:
-        folder = f"{OUTPUT_DIR}/cellranger/{{sublibrary}}"
-    output:
-        loom_file = f"{OUTPUT_DIR}/loom/{{sublibrary}}.loom"
-    resources:
-        mem_mb = 8000,  # 8GB for loompy
-        cpus = 4,
-        partition = "standard"
-    threads: 4
-    run:
-        loompy.create_from_cellranger(input.folder, f"{OUTPUT_DIR}/loom", genome="hg38")
 
 # Rule: Seurat
 rule seurat:
