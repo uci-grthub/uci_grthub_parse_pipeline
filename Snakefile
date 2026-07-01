@@ -219,8 +219,8 @@ _bp_nonbp_outputs = (
 rule all:
     input:
         # # FastQC reports
-        # expand(f"fastqc/{{sublibrary}}_r1_fastqc.html", sublibrary=SUBLIBRARIES),
-        # expand(f"fastqc/{{sublibrary}}_r2_fastqc.html", sublibrary=SUBLIBRARIES),
+        expand(f"fastqc/{{sublibrary}}_r1_fastqc.html", sublibrary=SUBLIBRARIES),
+        expand(f"fastqc/{{sublibrary}}_r2_fastqc.html", sublibrary=SUBLIBRARIES),
         # CellRanger outputs
         # expand(f"{OUTPUT_DIR}/cellranger/{{sublibrary}}/outs/web_summary.html", sublibrary=SUBLIBRARIES),
         # expand(f"{OUTPUT_DIR}/cellranger/{{sublibrary}}/outs/filtered_feature_bc_matrix.h5", sublibrary=SUBLIBRARIES),

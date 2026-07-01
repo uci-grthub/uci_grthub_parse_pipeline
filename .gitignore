@@ -34,3 +34,5 @@ src/parse-upload-1.2.1.py
 resume_params.txt
 part_etags.txt
 *.log
+.codetree/
+tmp/

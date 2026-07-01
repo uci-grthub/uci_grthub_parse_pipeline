@@ -10,14 +10,14 @@
 paths:
   fastqs: "data/FASTQ"  # Updated to use workspace relative path
   output: "output"  # Output directory for all samples
-
+# /share/crsp/lab/ccbs/ucightf/project_2/DARLIN_022626/0126I_27_GaneA_Sublibrary1_1
 # Reference genome/transcriptome
 references:
   # Human reference (default)
-  transcriptome: "/dfs8/commondata/cellranger/refdata-cellranger-GRCh38-3.0.0"
+  # transcriptome: "/dfs8/commondata/cellranger/refdata-cellranger-GRCh38-3.0.0"
   # Mouse reference (alternative)
-  # transcriptome: "/dfs8/commondata/cellranger/refdata-cellranger-mm10-1.2.0"
-  # repeat_mask: "/dfs9/ucightf-lab/kstachel/kstachel_references/repeatmasker/Homo_sapiens_rm_refseq.out.gz"
+  transcriptome: "/dfs8/commondata/cellranger/refdata-cellranger-mm10-1.2.0"
+  repeat_mask: "/dfs9/ucightf-lab/kstachel/kstachel_references/repeatmasker/Homo_sapiens_rm_refseq.out.gz"
 
 # CellRanger parameters
 params:
@@ -33,8 +33,8 @@ feather_db: "/dfs9/ucightf-lab/kstachel/kstachel_references/scenic/hg38_refseq-1
 
 ## Parse
 parse_container: "/dfs7/singularity_containers/rcic/parsebio-1.0.3.sif"
-parse_transcriptome: "/dfs9/ucightf-lab/kstachel/TOOLS/REFERENCES/human/split-pipe/hg38" # human
-# parse_transcriptome: "/dfs9/ucightf-lab/kstachel/TOOLS/REFERENCES/mouse/split-pipe/grcm38" # mouse
+# parse_transcriptome: "/dfs9/ucightf-lab/kstachel/TOOLS/REFERENCES/human/split-pipe/hg38" # human
+parse_transcriptome: "/dfs9/ucightf-lab/kstachel/TOOLS/REFERENCES/mouse/split-pipe/grcm38" # mouse
 sample_list: "metadata/sample_list.txt"
 
 # Scanpy/scVI integration parameters
