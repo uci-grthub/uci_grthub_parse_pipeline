@@ -20,9 +20,19 @@ This repository provides a comprehensive Snakemake-based workflow for analyzing 
 - `envs/`: Conda environment YAMLs for reproducibility.
 
 ## Getting Started
+0. **Clone the repository:**
+   ```bash
+   git clone https://github.com/uci-grthub/uci_grthub_parse_pipeline.git
+   cd uci_grthub_parse_pipeline
+   ```
 1. **Install Snakemake:**
    ```bash
    conda install -c conda-forge snakemake
+   ```
+   The downstream Python/R analysis stack (scanpy, Harmony, Seurat, Shiny, etc.)
+   is pinned separately in `pixi.toml`; install it with:
+   ```bash
+   pixi install -e uci-grthub-parse-pipeline
    ```
 
 2. **Configure YAML files:** Edit sample IDs and paths in `config_cellranger.yaml` or `config_cellranger_multi.yaml`.
