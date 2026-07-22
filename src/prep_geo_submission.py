@@ -10,21 +10,25 @@ Usage:
 """
 import argparse
 import csv
+import hashlib
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill
+import yaml
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+CONFIG_PATH = PROJECT_DIR / "config.yaml"
 METADATA_CSV = PROJECT_DIR / "metadata" / "metadata.csv"
 FASTQ_DIR = PROJECT_DIR / "data" / "FASTQ"
 CHECKSUMS_FILE = PROJECT_DIR / "data" / "checksums.md5"
+SAMPLE_LIST_FILE = PROJECT_DIR / "data" / "sample_list.txt"
 PROCESSED_DIR = PROJECT_DIR / "output" / "parse_comb"
 TEMPLATE_PATH = PROJECT_DIR / "docs" / "parse_template.xlsx"
-DEFAULT_OUTPUT = PROJECT_DIR / "output" / "geo_submission_metadata.xlsx"
+DEFAULT_OUTPUT_DIR = PROJECT_DIR / "output"
 
 # ---- Experiment-level constants ----
 ORGANISM = "Homo sapiens"
@@ -52,6 +56,14 @@ LIBRARY_CONSTRUCTION_PROTOCOL = (
 
 DATA_PROCESSING_STEPS = [
     (
+        "Single-cell libraries were generated using the Parse Biosciences combinatorial "
+        "barcoding platform (8 sublibraries sequenced across 3 lanes). All samples were "
+        "multiplexed across the shared raw FASTQ files; individual sample demultiplexing "
+        "and expression quantification were performed by the split-pipe pipeline based on "
+        "cell barcode assignments. The same pooled FASTQ files are therefore listed as the "
+        "raw files for every sample."
+    ),
+    (
         "Raw FASTQ files from each sublibrary were processed independently using "
         "split-pipe v1.6.0 (Parse Biosciences) in '--mode all' with the GRCh38 (hg38) "
         "reference transcriptome."
@@ -71,11 +83,6 @@ PROCESSED_FILES_FORMAT = (
     "count_matrix.mtx: sparse UMI count matrix (Matrix Market format, cells × genes); "
     "all_genes.csv: gene annotations (Ensembl ID, gene name); "
     "cell_metadata.csv: per-cell metadata including barcode, sample assignment, and QC metrics."
-)
-
-STUDY_TITLE_PLACEHOLDER = (
-    "Single-cell transcriptomic profiling of bisphenol analogue and nicotine "
-    "pouch extract effects on human osteogenic differentiation"
 )
 
 STUDY_SUMMARY_PLACEHOLDER = (
@@ -98,6 +105,29 @@ EXPERIMENTAL_DESIGN_PLACEHOLDER = (
 def load_metadata(path: Path) -> list[dict]:
     with open(path, newline="") as fh:
         return list(csv.DictReader(fh))
+
+
+def load_sample_list(path: Path) -> list[tuple[str, str]]:
+    """Return (sample_name, full_line) for each entry of the Parse sample list.
+
+    Each line is '<sample_name> <well(s)>'; the full line is preserved verbatim
+    so the per-experiment lists are exact subsets of the original.
+    """
+    entries: list[tuple[str, str]] = []
+    with open(path) as fh:
+        for line in fh:
+            text = line.rstrip("\n")
+            if text.strip():
+                entries.append((text.split()[0], text))
+    return entries
+
+
+def load_submission_titles(path: Path) -> dict[str, str]:
+    """Return {experiment_id: title} from the `geo.submissions` config block."""
+    with open(path) as fh:
+        config = yaml.safe_load(fh) or {}
+    submissions = (config.get("geo") or {}).get("submissions") or {}
+    return {str(exp): entry["title"] for exp, entry in submissions.items()}
 
 
 def load_checksums(path: Path) -> dict[str, str]:
@@ -149,13 +179,45 @@ def collect_fastq_runs(fastq_dir: Path) -> list[dict]:
     return runs
 
 
-def collect_processed_files(processed_dir: Path, sample_title: str) -> list[str]:
-    """Return basenames of processed DGE files for a sample."""
+def collect_processed_files(processed_dir: Path, sample_title: str) -> list[tuple[str, Path]]:
+    """Return (geo_file_name, path) for each processed DGE file of a sample.
+
+    Every sample's files share the same basenames (count_matrix.mtx, etc.), so
+    the GEO file name is prefixed with the sample title to make it unique across
+    the submission, as GEO requires.
+    """
     dge_dir = processed_dir / sample_title / "DGE_filtered"
-    if not dge_dir.exists():
-        return []
-    files = ["count_matrix.mtx", "all_genes.csv", "cell_metadata.csv"]
-    return [f for f in files if (dge_dir / f).exists()]
+    result: list[tuple[str, Path]] = []
+    for fname in ("count_matrix.mtx", "all_genes.csv", "cell_metadata.csv"):
+        path = dge_dir / fname
+        if path.exists():
+            result.append((f"{sample_title}_{fname}", path))
+    return result
+
+
+def md5sum(path: Path) -> str:
+    """Return the hex MD5 digest of a file, read in chunks."""
+    digest = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stage_processed_files(metadata: list[dict], dest_dir: Path) -> int:
+    """Copy each sample's processed files into dest_dir under their GEO names.
+
+    The GEO (sample-prefixed) file name matches what is written to the SAMPLES
+    and MD5 Checksums sheets, so the staged folder can be uploaded as-is.
+    Returns the number of files copied.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for row in metadata:
+        for name, path in collect_processed_files(PROCESSED_DIR, row["sample_title"]):
+            shutil.copy2(path, dest_dir / name)
+            count += 1
+    return count
 
 
 def cell_type_to_tissue(cell_type: str) -> str:
@@ -176,189 +238,172 @@ def build_sample_title_display(row: dict) -> str:
     return ", ".join(parts)
 
 
-def build_geo_workbook(metadata: list[dict], fastq_runs: list[dict]) -> openpyxl.Workbook:
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # remove default sheet
+TREATMENT_PROTOCOL = (
+    "Cells were treated with bisphenol analogues (BPA, BPF, BPS) at IC10, "
+    "IC25, or IC50 concentrations, or with Zyn nicotine pouch extracts "
+    "(Chill, Wintergreen, Smooth, Original) at 3 mg or 6 mg equivalents, "
+    "for 24 hours prior to harvest. Untreated controls received vehicle only."
+)
 
-    _write_study_sheet(wb)
-    _write_samples_sheet(wb, metadata)
-    _write_protocols_sheet(wb)
-    _write_paired_end_sheet(wb, fastq_runs)
-    _write_md5_sheet(wb, fastq_runs)
+# Anchor rows within the template's "Metadata" sheet (1-indexed). The STUDY
+# section and the SAMPLES header are fixed; SAMPLES data begins at
+# SAMPLE_FIRST_ROW and the PROTOCOLS/PAIRED-END sections that follow are shifted
+# down when more sample rows than the template provides are needed.
+STUDY_ROWS = {
+    "title": 12,
+    "summary": 13,
+    "experimental design": 14,
+    "contributor": 15,
+    "supplementary file": 22,
+}
+SAMPLE_HEADER_ROW = 38
+SAMPLE_FIRST_ROW = 39
+SAMPLE_TEMPLATE_ROWS = 15  # blank sample rows the template provides (39-53)
+RAW_FIRST_COL = 18  # "*raw file" column after inserting a 3rd processed column (R1 pool; R2 pool in next)
+PROTOCOL_ROWS = {
+    "growth protocol": 57,
+    "treatment protocol": 58,
+    "extract protocol": 59,
+    "library construction protocol": 60,
+    "data processing step": 62,  # first of several consecutive rows
+    "genome build/assembly": 67,
+    "processed data files format and content": 68,
+}
+PAIRED_END_FIRST_ROW = 77
+MD5_FIRST_ROW = 9  # first data row of the "MD5 Checksums" sheet
 
+
+def build_geo_workbook(metadata: list[dict], fastq_runs: list[dict], title: str) -> openpyxl.Workbook:
+    """Fill the official GEO template in place with this experiment's data."""
+    wb = openpyxl.load_workbook(TEMPLATE_PATH)
+    ws = wb["Metadata"]
+
+    _fill_metadata_sheet(ws, metadata, fastq_runs, title)
+    _fill_md5_sheet(wb["MD5 Checksums"], fastq_runs, metadata)
     return wb
 
 
-def _section_header(ws, row: int, label: str):
-    cell = ws.cell(row=row, column=1, value=label)
-    cell.font = Font(bold=True, size=12)
-    cell.fill = PatternFill("solid", fgColor="DDEBF7")
+def _fill_metadata_sheet(ws, metadata: list[dict], fastq_runs: list[dict], title: str) -> int:
+    # STUDY section
+    ws.cell(row=STUDY_ROWS["title"], column=2, value=title)
+    ws.cell(row=STUDY_ROWS["summary"], column=2, value=STUDY_SUMMARY_PLACEHOLDER)
+    ws.cell(row=STUDY_ROWS["experimental design"], column=2, value=EXPERIMENTAL_DESIGN_PLACEHOLDER)
+    ws.cell(row=STUDY_ROWS["contributor"], column=2, value="Sparks, Nicole")
+    ws.cell(row=STUDY_ROWS["contributor"] + 1, column=2,
+            value="[TODO: Add additional contributors as Lastname, Firstname]")
+
+    # SAMPLES: the template ships two "processed data file" columns (O, P) but
+    # each sample has three processed outputs, so add a third column. Insert it
+    # to the left of the raw-file columns, which keeps the required-field
+    # dropdowns (columns C, D, K, L, M) in place.
+    ws.insert_cols(17)
+    ws.cell(row=SAMPLE_HEADER_ROW, column=17, value="processed data file")
+
+    # Every biological sample is spread across all Parse sublibraries via
+    # combinatorial barcoding, so each sample's raw files are the full shared
+    # FASTQ pool. GEO supports this: rather than one column per file, list each
+    # read type's pooled files in its own "*raw file"/"raw file" cell,
+    # comma-separated, identical on every sample row. The template provides four
+    # raw-file columns, filled here with the pooled R1, R2, I1, and I2 lists. The
+    # per-file R1/R2/I1/I2 grouping is enumerated once in the PAIRED-END
+    # EXPERIMENTS section.
+    r1_pool = ", ".join(run["R1"] for run in fastq_runs if run["R1"])
+    r2_pool = ", ".join(run["R2"] for run in fastq_runs if run["R2"])
+    i1_pool = ", ".join(run["I1"] for run in fastq_runs if run["I1"])
+    i2_pool = ", ".join(run["I2"] for run in fastq_runs if run["I2"])
+
+    # Make room for samples beyond the template's blank rows so the inserted
+    # rows land above the PROTOCOLS section.
+    offset = max(0, len(metadata) - SAMPLE_TEMPLATE_ROWS)
+    if offset:
+        ws.insert_rows(SAMPLE_FIRST_ROW + SAMPLE_TEMPLATE_ROWS, offset)
+
+    for i, row in enumerate(metadata):
+        r = SAMPLE_FIRST_ROW + i
+        proc_names = [name for name, _ in collect_processed_files(PROCESSED_DIR, row["sample_title"])]
+        while len(proc_names) < 3:
+            proc_names.append("")
+        treatment = "untreated" if row["treatment"] == "UNT" \
+            else f"{row['treatment']} {row['treatment_level']}"
+        values = [
+            row["sample_title"],                    # A *library name
+            build_sample_title_display(row),        # B *title (incl. level + day)
+            LIBRARY_STRATEGY,                       # C *library strategy
+            ORGANISM,                               # D *organism
+            cell_type_to_tissue(row["cell_type"]),  # E **tissue
+            "hESC-derived",                         # F **cell line
+            row["cell_type"],                       # G **cell type
+            "",                                     # H genotype
+            treatment,                              # I treatment
+            "",                                     # J batch
+            MOLECULE,                               # K *molecule
+            SINGLE_OR_PAIRED,                       # L *single or paired-end
+            INSTRUMENT_MODEL,                       # M *instrument model
+            row["experiment_explanation"],          # N description
+            proc_names[0],                          # O processed data file
+            proc_names[1],                          # P processed data file
+            proc_names[2],                          # Q processed data file
+        ]
+        for c, value in enumerate(values, start=1):
+            ws.cell(row=r, column=c, value=value)
+        # Raw files: the same pooled R1/R2/I1/I2 FASTQ lists on every sample row.
+        ws.cell(row=r, column=RAW_FIRST_COL, value=r1_pool)      # R *raw file (R1 pool)
+        ws.cell(row=r, column=RAW_FIRST_COL + 1, value=r2_pool)  # S raw file (R2 pool)
+        ws.cell(row=r, column=RAW_FIRST_COL + 2, value=i1_pool)  # T raw file (I1 pool)
+        ws.cell(row=r, column=RAW_FIRST_COL + 3, value=i2_pool)  # U raw file (I2 pool)
+
+    # PROTOCOLS section (shifted down by the inserted sample rows)
+    ws.cell(row=PROTOCOL_ROWS["treatment protocol"] + offset, column=2, value=TREATMENT_PROTOCOL)
+    ws.cell(row=PROTOCOL_ROWS["extract protocol"] + offset, column=2, value=EXTRACT_PROTOCOL)
+    ws.cell(row=PROTOCOL_ROWS["library construction protocol"] + offset, column=2,
+            value=LIBRARY_CONSTRUCTION_PROTOCOL)
+    for i, step in enumerate(DATA_PROCESSING_STEPS):
+        ws.cell(row=PROTOCOL_ROWS["data processing step"] + offset + i, column=2, value=step)
+    ws.cell(row=PROTOCOL_ROWS["genome build/assembly"] + offset, column=2, value=GENOME_BUILD)
+    ws.cell(row=PROTOCOL_ROWS["processed data files format and content"] + offset, column=2,
+            value=PROCESSED_FILES_FORMAT)
+
+    # PAIRED-END EXPERIMENTS section (R1/R2/I1/I2 per FASTQ run)
+    for i, run in enumerate(fastq_runs):
+        r = PAIRED_END_FIRST_ROW + offset + i
+        for c, key in enumerate(("R1", "R2", "I1", "I2"), start=1):
+            ws.cell(row=r, column=c, value=run[key])
+
+    return offset
 
 
-def _comment_row(ws, row: int, text: str):
-    cell = ws.cell(row=row, column=1, value=f"# {text}")
-    cell.font = Font(italic=True, color="595959")
-
-
-def _write_study_sheet(wb: openpyxl.Workbook):
-    ws = wb.create_sheet("STUDY")
-    ws.column_dimensions["A"].width = 30
-    ws.column_dimensions["B"].width = 100
-
-    rows = [
-        ("*title", STUDY_TITLE_PLACEHOLDER),
-        ("*summary (abstract)", STUDY_SUMMARY_PLACEHOLDER),
-        ("*experimental design", EXPERIMENTAL_DESIGN_PLACEHOLDER),
-        ("contributor", "Sparks, Nicole"),
-        ("contributor", "[TODO: Add additional contributors as Lastname, Firstname]"),
-        ("supplementary file", ""),
-    ]
-    for i, (label, value) in enumerate(rows, start=1):
-        ws.cell(row=i, column=1, value=label)
-        ws.cell(row=i, column=2, value=value)
-
-
-def _write_samples_sheet(wb: openpyxl.Workbook, metadata: list[dict]):
-    ws = wb.create_sheet("SAMPLES")
-
-    header = [
-        "*library name",
-        "*title",
-        "*library strategy",
-        "*organism",
-        "**tissue",
-        "**cell line",
-        "**cell type",
-        "treatment",
-        "treatment level",
-        "day",
-        "experiment",
-        "*molecule",
-        "*single or paired-end",
-        "*instrument model",
-        "description",
-        "raw file 1",
-        "processed data file 1",
-        "processed data file 2",
-        "processed data file 3",
-    ]
-    ws.append(header)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="BDD7EE")
-
-    # All samples share the same sublibraries as raw files. Use the first
-    # sublibrary (L001 of Sublibrary1) as the representative raw file name.
-    # GEO reviewers understand that for combinatorial barcoding, all sublibraries
-    # contribute to each biological sample; full file listings are in PAIRED-END.
-    representative_raw = "See PAIRED-END EXPERIMENTS sheet; all 8 sublibraries shared"
-
-    for row in metadata:
-        title = row["sample_title"]
-        processed = collect_processed_files(PROCESSED_DIR, title)
-        # Pad to 3 entries (count_matrix.mtx, all_genes.csv, cell_metadata.csv)
-        while len(processed) < 3:
-            processed.append("")
-
-        ws.append([
-            title,                                      # *library name
-            build_sample_title_display(row),            # *title
-            LIBRARY_STRATEGY,                           # *library strategy
-            ORGANISM,                                   # *organism
-            cell_type_to_tissue(row["cell_type"]),      # **tissue
-            "hESC-derived",                             # **cell line
-            row["cell_type"],                           # **cell type
-            row["treatment"],                           # treatment
-            row["treatment_level"],                     # treatment level
-            row["day"],                                 # day
-            row["experiment"],                          # experiment
-            MOLECULE,                                   # *molecule
-            SINGLE_OR_PAIRED,                           # *single or paired-end
-            INSTRUMENT_MODEL,                           # *instrument model
-            row["experiment_explanation"],              # description
-            representative_raw,                         # raw file 1
-            processed[0],                               # processed data file 1
-            processed[1],                               # processed data file 2
-            processed[2],                               # processed data file 3
-        ])
-
-    # Auto-width columns
-    for col in ws.columns:
-        max_len = max((len(str(c.value or "")) for c in col), default=0)
-        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 60)
-
-
-def _write_protocols_sheet(wb: openpyxl.Workbook):
-    ws = wb.create_sheet("PROTOCOLS")
-    ws.column_dimensions["A"].width = 35
-    ws.column_dimensions["B"].width = 120
-
-    rows = [
-        ("growth protocol", ""),
-        ("treatment protocol", (
-            "Cells were treated with bisphenol analogues (BPA, BPF, BPS) at IC10, "
-            "IC25, or IC50 concentrations, or with Zyn nicotine pouch extracts "
-            "(Chill, Wintergreen, Smooth, Original) at 3 mg or 6 mg equivalents, "
-            "for 24 hours prior to harvest. Untreated controls received vehicle only."
-        )),
-        ("*extract protocol", EXTRACT_PROTOCOL),
-        ("*library construction protocol", LIBRARY_CONSTRUCTION_PROTOCOL),
-    ]
-    for label, value in rows:
-        ws.append([label, value])
-
-    ws.append(["*data processing step", DATA_PROCESSING_STEPS[0]])
-    for step in DATA_PROCESSING_STEPS[1:]:
-        ws.append(["data processing step", step])
-
-    ws.append(["*genome build/assembly", GENOME_BUILD])
-    ws.append(["*processed data files format and content", PROCESSED_FILES_FORMAT])
-
-    for cell in ws["A"]:
-        cell.font = Font(bold=True)
-
-
-def _write_paired_end_sheet(wb: openpyxl.Workbook, fastq_runs: list[dict]):
-    ws = wb.create_sheet("PAIRED-END EXPERIMENTS")
-
-    header = ["file name 1 (R1)", "file name 2 (R2)", "file name 3 (I1)", "file name 4 (I2)", "sublibrary", "lane"]
-    ws.append(header)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="BDD7EE")
-
-    for run in fastq_runs:
-        ws.append([run["R1"], run["R2"], run["I1"], run["I2"], run["sublibrary"], run["lane"]])
-
-    for col in ws.columns:
-        max_len = max((len(str(c.value or "")) for c in col), default=0)
-        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 80)
-
-
-def _write_md5_sheet(wb: openpyxl.Workbook, fastq_runs: list[dict]):
-    ws = wb.create_sheet("MD5 Checksums")
+def _fill_md5_sheet(ws, fastq_runs: list[dict], metadata: list[dict]):
     checksums = load_checksums(CHECKSUMS_FILE)
 
-    header = ["file name", "MD5 checksum"]
-    ws.append(header)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="BDD7EE")
-
+    # RAW FILES (columns A/B): checksums come from the precomputed md5 file.
+    r = MD5_FIRST_ROW
     for run in fastq_runs:
-        for fname in [run["R1"], run["R2"], run["I1"], run["I2"]]:
+        for key in ("R1", "R2", "I1", "I2"):
+            fname = run[key]
             if fname:
-                ws.append([fname, checksums.get(fname, "[TODO: compute]")])
+                ws.cell(row=r, column=1, value=fname)
+                ws.cell(row=r, column=2, value=checksums.get(fname, "[TODO: compute]"))
+                r += 1
 
-    ws.column_dimensions["A"].width = 70
-    ws.column_dimensions["B"].width = 40
+    # PROCESSED DATA FILES (columns F/G): computed on the fly from the files on
+    # disk, using the same sample-prefixed names written to the SAMPLES section.
+    r = MD5_FIRST_ROW
+    for row in metadata:
+        for name, path in collect_processed_files(PROCESSED_DIR, row["sample_title"]):
+            ws.cell(row=r, column=6, value=name)
+            ws.cell(row=r, column=7, value=md5sum(path))
+            r += 1
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output", type=Path, default=DEFAULT_OUTPUT,
-        help="Output Excel file path (default: output/geo_submission_metadata.xlsx)"
+        "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
+        help="Output directory for the per-experiment GEO workbooks (default: output/)"
+    )
+    parser.add_argument(
+        "--no-stage", action="store_true",
+        help="Skip copying processed files into per-experiment upload folders"
     )
     args = parser.parse_args()
 
@@ -366,6 +411,13 @@ def main():
         sys.exit(f"ERROR: metadata not found at {METADATA_CSV}")
     if not FASTQ_DIR.exists():
         sys.exit(f"ERROR: FASTQ directory not found at {FASTQ_DIR}")
+    if not TEMPLATE_PATH.exists():
+        sys.exit(f"ERROR: GEO template not found at {TEMPLATE_PATH}")
+
+    print(f"Loading submission titles from {CONFIG_PATH}")
+    titles = load_submission_titles(CONFIG_PATH)
+    if not titles:
+        sys.exit(f"ERROR: no geo.submissions titles found in {CONFIG_PATH}")
 
     print(f"Loading metadata from {METADATA_CSV}")
     metadata = load_metadata(METADATA_CSV)
@@ -375,12 +427,41 @@ def main():
     fastq_runs = collect_fastq_runs(FASTQ_DIR)
     print(f"  {len(fastq_runs)} FASTQ runs (sublibrary × lane)")
 
-    print("Building GEO workbook...")
-    wb = build_geo_workbook(metadata, fastq_runs)
+    sample_list = load_sample_list(SAMPLE_LIST_FILE) if SAMPLE_LIST_FILE.exists() else []
+    if not sample_list:
+        print(f"  NOTE: {SAMPLE_LIST_FILE} not found; skipping per-experiment sample lists")
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(args.output)
-    print(f"Saved to {args.output}")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    experiments = sorted({row["experiment"] for row in metadata})
+    for exp in experiments:
+        exp_metadata = [row for row in metadata if row["experiment"] == exp]
+        title = titles.get(exp)
+        if title is None:
+            sys.exit(f"ERROR: no title configured for experiment {exp} in {CONFIG_PATH}")
+
+        print(f"\nBuilding GEO workbook for experiment {exp} ({len(exp_metadata)} samples)...")
+        print(f"  title: {title}")
+        wb = build_geo_workbook(exp_metadata, fastq_runs, title)
+
+        output = args.output_dir / f"geo_submission_metadata_exp{exp}.xlsx"
+        wb.save(output)
+        print(f"  saved to {output}")
+
+        if not args.no_stage:
+            upload_dir = args.output_dir / f"geo_upload_exp{exp}"
+            n_staged = stage_processed_files(exp_metadata, upload_dir)
+            print(f"  staged {n_staged} processed files to {upload_dir}")
+
+        if sample_list:
+            exp_titles = {row["sample_title"] for row in exp_metadata}
+            exp_lines = [line for name, line in sample_list if name in exp_titles]
+            missing = exp_titles - {name for name, _ in sample_list}
+            if missing:
+                print(f"  WARNING: no sample_list entry for: {', '.join(sorted(missing))}")
+            sample_list_out = args.output_dir / f"sample_list_exp{exp}.txt"
+            sample_list_out.write_text("\n".join(exp_lines) + "\n")
+            print(f"  wrote {len(exp_lines)} sample_list entries to {sample_list_out}")
 
     # Summary of what needs manual review
     print("\n--- Fields requiring manual review ---")
@@ -388,11 +469,14 @@ def main():
     print("    *summary (abstract)  — insert final abstract text")
     print("    contributor          — add all co-authors")
     print("    supplementary file   — add path to combined AnnData/Seurat object if any")
-    print("  SAMPLES sheet:")
-    print("    raw file 1           — currently placeholder; update once FASTQ files are")
-    print("                           registered in GEO FTP or note multiplexed structure")
-    print("  PROTOCOLS sheet:")
+    print("  SAMPLES section:")
+    print("    raw file 1-4         — pooled R1, R2, I1, I2 FASTQ lists (comma-separated),")
+    print("                           identical on every sample row (shared Parse pool)")
+    print("  PROTOCOLS section:")
     print("    growth protocol      — add hESC culture and differentiation protocol details")
+    print("  Upload:")
+    print("    geo_upload_exp*/     — processed files staged under GEO names; upload these")
+    print("    raw FASTQs           — upload from data/FASTQ (names already match the sheet)")
 
 
 if __name__ == "__main__":

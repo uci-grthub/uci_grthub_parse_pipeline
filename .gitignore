@@ -38,3 +38,4 @@ part_etags.txt
 tmp/
 src/luisa_code.R
 src/luisa_annotation.R
+ftp_config.yaml
