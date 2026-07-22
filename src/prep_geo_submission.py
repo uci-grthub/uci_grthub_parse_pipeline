@@ -22,6 +22,9 @@ import yaml
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_DIR / "config.yaml"
+# GEO submission titles are kept out of git in config.local.yaml (gitignored),
+# falling back to config.yaml if the local file is absent.
+CONFIG_LOCAL_PATH = PROJECT_DIR / "config.local.yaml"
 METADATA_CSV = PROJECT_DIR / "metadata" / "metadata.csv"
 FASTQ_DIR = PROJECT_DIR / "data" / "FASTQ"
 CHECKSUMS_FILE = PROJECT_DIR / "data" / "checksums.md5"
@@ -123,8 +126,13 @@ def load_sample_list(path: Path) -> list[tuple[str, str]]:
 
 
 def load_submission_titles(path: Path) -> dict[str, str]:
-    """Return {experiment_id: title} from the `geo.submissions` config block."""
-    with open(path) as fh:
+    """Return {experiment_id: title} from the `geo.submissions` config block.
+
+    Prefers config.local.yaml (gitignored) so the titles stay out of version
+    control, falling back to the given path (config.yaml) when it is absent.
+    """
+    source = CONFIG_LOCAL_PATH if CONFIG_LOCAL_PATH.exists() else path
+    with open(source) as fh:
         config = yaml.safe_load(fh) or {}
     submissions = (config.get("geo") or {}).get("submissions") or {}
     return {str(exp): entry["title"] for exp, entry in submissions.items()}
@@ -414,7 +422,8 @@ def main():
     if not TEMPLATE_PATH.exists():
         sys.exit(f"ERROR: GEO template not found at {TEMPLATE_PATH}")
 
-    print(f"Loading submission titles from {CONFIG_PATH}")
+    titles_source = CONFIG_LOCAL_PATH if CONFIG_LOCAL_PATH.exists() else CONFIG_PATH
+    print(f"Loading submission titles from {titles_source}")
     titles = load_submission_titles(CONFIG_PATH)
     if not titles:
         sys.exit(f"ERROR: no geo.submissions titles found in {CONFIG_PATH}")

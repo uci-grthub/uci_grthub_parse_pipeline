@@ -63,3 +63,6 @@ group2_value: "control"
 
 notebooks:
   harmony_integration_notebook: "src/inspect_integrated_anndata.ipynb"
+
+# GEO submission titles live in config.local.yaml (gitignored) so they stay out
+# of version control. See load_submission_titles in src/prep_geo_submission.py.
